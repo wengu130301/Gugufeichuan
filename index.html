@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#05060f">
+<title>巨石飞船</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{position:fixed;inset:0;overflow:hidden;background:#05060f;
+    font-family:-apple-system,system-ui,"PingFang SC",sans-serif;
+    touch-action:none;-webkit-user-select:none;user-select:none}
+  #c{display:block;width:100%;height:100%;touch-action:none}
+  #ui{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;padding:20px}
+  .panel{pointer-events:auto;background:rgba(10,14,30,.92);border:1px solid rgba(120,180,255,.35);
+    border-radius:18px;padding:26px 24px;color:#dce8ff;text-align:center;width:100%;max-width:330px;
+    box-shadow:0 0 50px rgba(60,140,255,.28);animation:pop .25s ease}
+  @keyframes pop{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+  .panel h1{font-size:21px;letter-spacing:3px;margin-bottom:12px;color:#8fd0ff;font-weight:800}
+  .panel p{font-size:13px;line-height:1.85;color:#8fa2c4;margin:3px 0}
+  .panel .big{font-size:30px;color:#fff;margin:10px 0 4px;font-weight:700;letter-spacing:1px}
+  .panel .sub{font-size:12px;color:#6d7f9e;margin-top:10px}
+  .btn{margin-top:20px;display:block;padding:13px 0;border-radius:999px;
+    background:linear-gradient(135deg,#2b6cff,#4fd1ff);color:#03101f;font-weight:800;
+    font-size:16px;letter-spacing:2px;cursor:pointer;touch-action:manipulation}
+  .btn:active{transform:scale(.97);opacity:.9}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui"><div class="panel hidden" id="panel"></div></div>
+<script>
+(function(){
+'use strict';
+
+/* ================= 配置区（想调难度改这里） ================= */
+var CFG = {
+  shipYRatio: 0.78,      // 飞船在屏幕的高度比例
+  baseShipR: 15,         // 初始飞船半径
+  shipRPerLevel: 0.12,   // 每级变大的比例
+  baseDmg: 6,            // 初始单发伤害
+  dmgPerLevel: 1.35,     // 每级伤害倍率
+  baseRate: 4,           // 初始每秒射击次数
+  ratePerLevel: 1.05,    // 每级射速倍率
+  baseEnergy: 100,       // 第一次升级所需能量
+  energyGrowth: 1.55,    // 每级能量需求倍率
+  baseRockR: 15,         // 初始巨石半径
+  rockGrowth: 1.009,     // 巨石每秒自我成长倍率（核心压力）
+  maxRocks: 10,          // 同屏巨石上限
+  maxLevel: 30
+};
+
+/* ================= 基础状态 ================= */
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d', { alpha: false });
+var panel = document.getElementById('panel');
+
+var W = 420, H = 900, DPR = 1, SC = 1;
+var horizon = { x: 210, y: 190 };
+
+var G = {
+  state: 'ready',      // ready | playing | dead
+  time: 0,
+  level: 1,
+  energy: 0,
+  energyNeed: CFG.baseEnergy,
+  shield: 3,
+  maxShield: 3,
+  kills: 0,
+  spawnTimer: 0.6,
+  fireTimer: 0,
+  rocks: [], bullets: [], orbs: [], parts: [], stars: [],
+  shake: 0,
+  invuln: 0,
+  levelFlash: 0,
+  ship: { x: 210, y: 700, tx: 210, r: CFG.baseShipR },
+  pointerActive: false,
+  best: 0
+};
+
+try { G.best = parseFloat(localStorage.getItem('shipbest') || '0') || 0; } catch(e){}
+
+/* ================= 工具函数 ================= */
+function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
+
+function rr(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function fmtTime(t){
+  var m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return m + ':' + (s < 10 ? '0' : '') + s;
+}
+
+/* ================= 尺寸与初始化 ================= */
+function initStars(){
+  G.stars.length = 0;
+  for (var i = 0; i < 70; i++){
+    G.stars.push({
+      a: Math.random() * Math.PI * 2,
+      d: 20 + Math.random() * 420,
+      sp: 0.5 + Math.random() * 1.5
+    });
+  }
+}
+
+function resize(){
+  var w = window.innerWidth, h = window.innerHeight;
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = 420;
+  H = Math.round(W * h / w);
+  SC = w / W;
+
+  canvas.width = Math.round(w * DPR);
+  canvas.height = Math.round(h * DPR);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  ctx.setTransform(SC * DPR, 0, 0, SC * DPR, 0, 0);
+
+  horizon.x = W / 2;
+  horizon.y = H * 0.22;
+  G.ship.y = H * CFG.shipYRatio;
+  if (G.state !== 'playing') G.ship.x = G.ship.tx = W / 2;
+  G.ship.tx = clamp(G.ship.tx, G.ship.r + 4, W - G.ship.r - 4);
+  G.ship.x = clamp(G.ship.x, G.ship.r + 4, W - G.ship.r - 4);
+
+  initStars();
+}
+
+/* ================= 输入 ================= */
+function toLogicX(clientX){
+  var rect = canvas.getBoundingClientRect();
+  return (clientX - rect.left) / rect.width * W;
+}
+
+function onDown(e){
+  if (G.state !== 'playing') return;
+  G.pointerActive = true;
+  var x = toLogicX(e.clientX);
+  G.ship.tx = clamp(x, G.ship.r + 4, W - G.ship.r - 4);
+  e.preventDefault();
+}
+
+function onMove(e){
+  if (G.state !== 'playing') return;
+  if (e.pointerType === 'mouse' || G.pointerActive){
+    var x = toLogicX(e.clientX);
+    G.ship.tx = clamp(x, G.ship.r + 4, W - G.ship.r - 4);
+  }
+  e.preventDefault();
+}
+
+function onUp(){ G.pointerActive = false; }
+
+canvas.addEventListener('pointerdown', onDown, { passive: false });
+window.addEventListener('pointermove', onMove, { passive: false });
+window.addEventListener('pointerup', onUp);
+window.addEventListener('pointercancel', onUp);
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', function(){ setTimeout(resize, 120); });
+
+/* ================= 粒子 ================= */
+function spawnBurst(x, y, n, color, pw){
+  pw = pw || 1;
+  for (var i = 0; i < n; i++){
+    if (G.parts.length > 240) break;
+    var a = Math.random() * Math.PI * 2;
+    var sp = (60 + Math.random() * 280) * pw;
+    var life = 0.3 + Math.random() * 0.55;
+    G.parts.push({
+      x: x, y: y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: life, maxLife: life,
+      color: color,
+      size: (1.5 + Math.random() * 3) * pw
+    });
+  }
+}
+
+function updateParts(dt){
+  for (var i = G.parts.length - 1; i >= 0; i--){
+    var p = G.parts[i];
+    p.life -= dt;
+    if (p.life <= 0){ G.parts.splice(i, 1); continue; }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    var damp = Math.pow(0.12, dt);
+    p.vx *= damp;
+    p.vy = p.vy * damp + 200 * dt;
+  }
+}
+
+/* ================= 星星 ================= */
+function updateStars(dt){
+  for (var i = 0; i < G.stars.length; i++){
+    var s = G.stars[i];
+    s.d += (20 + s.d * 0.9) * s.sp * dt;
+    if (s.d > 900){ s.d = 20; s.a = Math.random() * Math.PI * 2; }
+  }
+}
+
+/* ================= 游戏流程 ================= */
+function reset(){
+  G.state = 'playing';
+  G.time = 0;
+  G.level = 1;
+  G.energy = 0;
+  G.energyNeed = CFG.baseEnergy;
+  G.shield = G.maxShield = 3;
+  G.kills = 0;
+  G.spawnTimer = 0.6;
+  G.fireTimer = 0;
+  G.rocks.length = 0;
+  G.bullets.length = 0;
+  G.orbs.length = 0;
+  G.parts.length = 0;
+  G.shake = 0;
+  G.invuln = 0;
+  G.levelFlash = 0;
+  G.ship.r = CFG.baseShipR;
+  G.ship.x = G.ship.tx = W / 2;
+  G.ship.y = H * CFG.shipYRatio;
+  G.pointerActive = false;
+}
+
+function start(){
+  hidePanel();
+  reset();
+}
+
+function gameOver(){
+  G.state = 'dead';
+  G.shake = 26;
+  spawnBurst(G.ship.x, G.ship.y, 44, '#ff8a5c', 1.3);
+
+  var score = Math.floor(G.time * 10 + G.kills * 25 + G.level * 50);
+  if (score > G.best){
+    G.best = score;
+    try { localStorage.setItem('shipbest', String(score)); } catch(e){}
+  }
+
+  showPanel(
+    '<h1>飞船损毁</h1>' +
+    '<p>存活时间</p>' +
+    '<div class="big">' + fmtTime(G.time) + '</div>' +
+    '<p>等级 Lv.' + G.level + ' · 击碎 ' + G.kills + '</p>' +
+    '<p class="sub">最高分 ' + Math.floor(G.best) + '</p>' +
+    '<div class="btn" id="startBtn">再来一次</div>'
+  );
+}
+
+function showPanel(html){
+  panel.innerHTML = html;
+  panel.classList.remove('hidden');
+  var btn = panel.querySelector('#startBtn');
+  if (btn) btn.addEventListener('click', function(e){ e.preventDefault(); start(); });
+}
+
+function hidePanel(){
+  panel.classList.add('hidden');
+  panel.innerHTML = '';
+}
+
+/* ================= 巨石 ================= */
+function spawnRock(){
+  var t = G.time;
+  var r0 = CFG.baseRockR * Math.pow(CFG.rockGrowth, t);
+  var hp = 20 + 0.06 * r0 * r0;
+  var dur = Math.max(2.4, 5.6 - t * 0.016);
+
+  var sx = W * (0.2 + Math.random() * 0.6);
+  var sy = H * 0.06 + Math.random() * H * 0.1;
+  var tx = G.ship.x + (Math.random() - 0.5) * 150;
+
+  var verts = [], n = 9;
+  for (var i = 0; i < n; i++) verts.push(0.78 + Math.random() * 0.36);
+
+  G.rocks.push({
+    sx: sx, sy: sy, tx: tx, ty: H + 90,
+    t: 0, sp: 1 / dur,
+    r0: r0, hp: hp, maxHp: hp,
+    verts: verts,
+    rot: Math.random() * Math.PI * 2,
+    rotSp: (Math.random() - 0.5) * 0.6,
+    hit: 0,
+    x: sx, y: sy, sr: 0
+  });
+}
+
+function destroyRock(idx){
+  var r = G.rocks[idx];
+  G.rocks.splice(idx, 1);
+  G.kills++;
+
+  var total = 5 + r.r0 * 0.5;
+  var n = Math.min(8, 1 + Math.floor(r.r0 / 12));
+  for (var k = 0; k < n; k++){
+    var a = Math.random() * Math.PI * 2;
+    var sp = 40 + Math.random() * 200;
+    G.orbs.push({
+      x: r.x, y: r.y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      val: total / n,
+      age: 0
+    });
+  }
+
+  spawnBurst(r.x, r.y, Math.min(26, 8 + Math.floor(r.r0)), '#9aa3bb', 1);
+  G.shake = Math.max(G.shake, Math.min(12, r.r0 * 0.35));
+}
+
+function damageShip(){
+  G.shield--;
+  G.invuln = 1.0;
+  G.shake = 22;
+  spawnBurst(G.ship.x, G.ship.y, 18, '#ff6b6b', 1);
+  if (G.shield <= 0) gameOver();
+}
+
+/* ================= 射击 ================= */
+function findTarget(){
+  var best = null, bt = -1;
+  for (var i = 0; i < G.rocks.length; i++){
+    var r = G.rocks[i];
+    if (r.y > G.ship.y - 24) continue;
+    if (r.t < 0.05) continue;
+    if (r.t > bt){ bt = r.t; best = r; }
+  }
+  return best;
+}
+
+function fireAt(tgt){
+  var dx = tgt.x - G.ship.x;
+  var dy = tgt.y - G.ship.y;
+  var d = Math.sqrt(dx * dx + dy * dy) || 1;
+  var sp = 1100;
+  var dmg = CFG.baseDmg * Math.pow(CFG.dmgPerLevel, G.level - 1);
+  G.bullets.push({
+    x: G.ship.x, y: G.ship.y - 8,
+    vx: dx / d * sp, vy: dy / d * sp,
+    life: 1.3, dmg: dmg
+  });
+}
+
+/* ================= 每帧逻辑 ================= */
+function updateGame(dt){
+  G.time += dt;
+
+  /* 飞船平滑跟随 */
+  G.ship.x += (G.ship.tx - G.ship.x) * Math.min(1, dt * 18);
+  G.ship.x = clamp(G.ship.x, G.ship.r + 4, W - G.ship.r - 4);
+
+  /* 生成巨石 */
+  G.spawnTimer -= dt;
+  if (G.spawnTimer <= 0 && G.rocks.length < CFG.maxRocks){
+    spawnRock();
+    var base = Math.max(0.5, 1.5 * Math.exp(-G.time * 0.0055));
+    G.spawnTimer = base * (0.8 + Math.random() * 0.45);
+  }
+
+  /* 巨石更新 */
+  var shipY = G.ship.y;
+  for (var i = G.rocks.length - 1; i >= 0; i--){
+    var r = G.rocks[i];
+    var prevY = r.y;
+
+    r.t += r.sp * dt;
+    r.tx += (G.ship.x - r.tx) * Math.min(1, dt * 1.2);
+
+    var k = Math.pow(Math.min(r.t, 1), 1.7);
+    r.x = r.sx + (r.tx - r.sx) * k;
+    r.y = r.sy + (r.ty - r.sy) * k;
+    r.sr = r.r0 * 0.14 * Math.pow(10.5, Math.min(r.t, 1));
+    r.rot += r.rotSp * dt;
+    if (r.hit > 0) r.hit = Math.max(0, r.hit - dt * 5);
+
+    /* 穿过飞船高度平面时判定撞击 */
+    if (prevY < shipY && r.y >= shipY && G.invuln <= 0){
+      if (Math.abs(r.x - G.ship.x) < r.sr * 0.9 + G.ship.r * 0.75){
+        damageShip();
+      }
+    }
+
+    if (r.t >= 1) G.rocks.splice(i, 1);
+  }
+
+  /* 自动射击 */
+  G.fireTimer -= dt;
+  if (G.fireTimer <= 0){
+    var tgt = findTarget();
+    if (tgt){
+      var rate = CFG.baseRate * Math.pow(CFG.ratePerLevel, G.level - 1);
+      G.fireTimer = 1 / rate;
+      fireAt(tgt);
+    } else {
+      G.fireTimer = 0.06;
+    }
+  }
+
+  /* 子弹 */
+  for (var b = G.bullets.length - 1; b >= 0; b--){
+    var bl = G.bullets[b];
+    bl.x += bl.vx * dt;
+    bl.y += bl.vy * dt;
+    bl.life -= dt;
+
+    if (bl.life <= 0 || bl.x < -30 || bl.x > W + 30 || bl.y < -30 || bl.y > H + 30){
+      G.bullets.splice(b, 1);
+      continue;
+    }
+
+    var hitDone = false;
+    for (var j = G.rocks.length - 1; j >= 0; j--){
+      var rk = G.rocks[j];
+      var dx = bl.x - rk.x, dy = bl.y - rk.y;
+      if (dx * dx + dy * dy < rk.sr * rk.sr * 0.85){
+        rk.hp -= bl.dmg;
+        rk.hit = 1;
+        spawnBurst(bl.x, bl.y, 3, '#ffd27a', 0.35);
+        G.bullets.splice(b, 1);
+        hitDone = true;
+        if (rk.hp <= 0) destroyRock(j);
+        break;
+      }
+    }
+    if (hitDone) continue;
+  }
+
+  /* 能量球 */
+  for (var o = G.orbs.length - 1; o >= 0; o--){
+    var ob = G.orbs[o];
+    ob.age += dt;
+
+    var odx = G.ship.x - ob.x;
+    var ody = G.ship.y - ob.y;
+    var od = Math.sqrt(odx * odx + ody * ody) || 1;
+
+    if (ob.age < 0.22){
+      ob.vx *= Math.pow(0.05, dt);
+      ob.vy *= Math.pow(0.05, dt);
+    } else {
+      var acc = 2000;
+      ob.vx += odx / od * acc * dt;
+      ob.vy += ody / od * acc * dt;
+      var spd = Math.sqrt(ob.vx * ob.vx + ob.vy * ob.vy);
+      var maxSpd = 950;
+      if (spd > maxSpd){
+        ob.vx = ob.vx / spd * maxSpd;
+        ob.vy = ob.vy / spd * maxSpd;
+      }
+    }
+
+    ob.x += ob.vx * dt;
+    ob.y += ob.vy * dt;
+
+    if (od < 24 + G.ship.r){
+      G.energy += ob.val;
+      spawnBurst(ob.x, ob.y, 2, '#8ef7ff', 0.3);
+      G.orbs.splice(o, 1);
+    }
+  }
+
+  /* 升级 */
+  while (G.energy >= G.energyNeed && G.level < CFG.maxLevel){
+    G.energy -= G.energyNeed;
+    G.level++;
+    G.energyNeed = Math.round(CFG.baseEnergy * Math.pow(CFG.energyGrowth, G.level - 1));
+    G.ship.r = CFG.baseShipR * (1 + CFG.shipRPerLevel * (G.level - 1));
+    G.ship.tx = clamp(G.ship.tx, G.ship.r + 4, W - G.ship.r - 4);
+    G.ship.x = clamp(G.ship.x, G.ship.r + 4, W - G.ship.r - 4);
+    G.levelFlash = 1;
+    G.shake = Math.max(G.shake, 8);
+    spawnBurst(G.ship.x, G.ship.y, 20, '#8ef7ff', 1.1);
+  }
+  if (G.level >= CFG.maxLevel) G.energy = Math.min(G.energy, G.energyNeed);
+
+  if (G.invuln > 0) G.invuln -= dt;
+  if (G.levelFlash > 0) G.levelFlash = Math.max(0, G.levelFlash - dt * 1.8);
+}
+
+function update(dt){
+  updateStars(dt);
+  updateParts(dt);
+  if (G.state === 'playing') updateGame(dt);
+  G.shake = Math.max(0, G.shake - 70 * dt);
+}
+
+/* ================= 渲染 ================= */
+function drawStars(){
+  ctx.lineCap = 'round';
+  for (var i = 0; i < G.stars.length; i++){
+    var s = G.stars[i];
+    var d2 = s.d - 14 - s.d * 0.05;
+    var x1 = horizon.x + Math.cos(s.a) * s.d;
+    var y1 = horizon.y + Math.sin(s.a) * s.d * 0.72;
+    var x2 = horizon.x + Math.cos(s.a) * d2;
+    var y2 = horizon.y + Math.sin(s.a) * d2 * 0.72;
+    var a = Math.min(1, s.d / 260) * 0.75;
+    ctx.strokeStyle = 'rgba(150,190,255,' + a.toFixed(3) + ')';
+    ctx.lineWidth = Math.min(2.2, 0.4 + s.d / 260);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+}
+
+function drawRocks(){
+  for (var i = 0; i < G.rocks.length; i++){
+    var r = G.rocks[i];
+    if (r.sr < 0.5) continue;
+
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    ctx.rotate(r.rot);
+
+    var n = r.verts.length;
+    ctx.beginPath();
+    for (var v = 0; v < n; v++){
+      var ang = v / n * Math.PI * 2;
+      var rr2 = r.sr * r.verts[v];
+      var px = Math.cos(ang) * rr2;
+      var py = Math.sin(ang) * rr2;
+      if (v === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+
+    ctx.fillStyle = '#5c6378';
+    ctx.fill();
+
+    ctx.strokeStyle = r.hit > 0 ? '#ffd27a' : 'rgba(22,26,40,0.9)';
+    ctx.lineWidth = Math.max(1.4, r.sr * 0.06);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.clip();
+    ctx.beginPath();
+    ctx.arc(-r.sr * 0.28, -r.sr * 0.3, r.sr * 0.62, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(190,200,228,0.2)';
+    ctx.fill();
+    ctx.restore();
+
+    var dmgRatio = 1 - r.hp / r.maxHp;
+    if (dmgRatio > 0.28 && r.sr > 6){
+      ctx.strokeStyle = 'rgba(10,12,20,0.55)';
+      ctx.lineWidth = Math.max(1, r.sr * 0.045);
+      ctx.beginPath();
+      ctx.moveTo(-r.sr * 0.5, -r.sr * 0.22);
+      ctx.lineTo(-r.sr * 0.1, r.sr * 0.1);
+      ctx.lineTo(-r.sr * 0.36, r.sr * 0.56);
+      ctx.stroke();
+      if (dmgRatio > 0.6){
+        ctx.beginPath();
+        ctx.moveTo(r.sr * 0.42, -r.sr * 0.5);
+        ctx.lineTo(r.sr * 0.1, 0);
+        ctx.lineTo(r.sr * 0.46, r.sr * 0.3);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawBullets(){
+  for (var i = 0; i < G.bullets.length; i++){
+    var b = G.bullets[i];
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 3.4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(140,240,255,0.35)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 1.9, 0, Math.PI * 2);
+    ctx.fillStyle = '#d9fbff';
+    ctx.fill();
+  }
+}
+
+function drawOrbs(){
+  for (var i = 0; i < G.orbs.length; i++){
+    var o = G.orbs[i];
+    var pulse = 1 + Math.sin(o.age * 14) * 0.15;
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, 7 * pulse, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(110,255,200,0.22)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, 3.4 * pulse, 0, Math.PI * 2);
+    ctx.fillStyle = '#9dffd8';
+    ctx.fill();
+  }
+}
+
+function drawShip(){
+  if (G.state === 'dead') return;
+  var s = G.ship;
+  var r = s.r;
+
+  ctx.save();
+  ctx.translate(s.x, s.y);
+
+  if (G.invuln > 0 && Math.floor(G.invuln * 18) % 2 === 0) ctx.globalAlpha = 0.35;
+
+  /* 尾焰 */
+  var fl = 1 + Math.sin(G.time * 42) * 0.28;
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.36, r * 0.78);
+  ctx.lineTo(0, r * (1.15 + fl * 0.55));
+  ctx.lineTo(r * 0.36, r * 0.78);
+  ctx.closePath();
+  var fg = ctx.createLinearGradient(0, r * 0.7, 0, r * 1.9);
+  fg.addColorStop(0, '#7ef0ff');
+  fg.addColorStop(1, 'rgba(60,120,255,0)');
+  ctx.fillStyle = fg;
+  ctx.fill();
+
+  /* 机翼 */
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.55, r * 0.05);
+  ctx.lineTo(-r * 1.02, r * 0.72);
+  ctx.lineTo(-r * 0.34, r * 0.66);
+  ctx.closePath();
+  ctx.moveTo(r * 0.55, r * 0.05);
+  ctx.lineTo(r * 1.02, r * 0.72);
+  ctx.lineTo(r * 0.34, r * 0.66);
+  ctx.closePath();
+  ctx.fillStyle = '#3f66b8';
+  ctx.fill();
+
+  /* 机身 */
+  ctx.beginPath();
+  ctx.moveTo(0, -r * 1.28);
+  ctx.lineTo(r * 0.62, r * 0.3);
+  ctx.lineTo(r * 0.34, r * 0.78);
+  ctx.lineTo(-r * 0.34, r * 0.78);
+  ctx.lineTo(-r * 0.62, r * 0.3);
+  ctx.closePath();
+  var bg = ctx.createLinearGradient(-r, -r, r, r);
+  bg.addColorStop(0, '#e6f2ff');
+  bg.addColorStop(0.5, '#9ec6ff');
+  bg.addColorStop(1, '#4a79d8');
+  ctx.fillStyle = bg;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(28,46,86,0.85)';
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+
+  /* 驾驶舱 */
+  ctx.beginPath();
+  ctx.ellipse(0, -r * 0.16, r * 0.29, r * 0.45, 0, 0, Math.PI * 2);
+  var cg = ctx.createRadialGradient(-r * 0.1, -r * 0.36, 1, 0, -r * 0.16, r * 0.5);
+  cg.addColorStop(0, '#eafdff');
+  cg.addColorStop(1, '#2ba8e0');
+  ctx.fillStyle = cg;
+  ctx.fill();
+
+  /* 升级光环 */
+  if (G.levelFlash > 0){
+    ctx.globalAlpha = G.levelFlash;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * (1.35 + (1 - G.levelFlash) * 3.2), 0, Math.PI * 2);
+    ctx.strokeStyle = '#8ef7ff';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+function drawParts(){
+  for (var i = 0; i < G.parts.length; i++){
+    var p = G.parts[i];
+    var a = p.life / p.maxLife;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD(){
+  if (G.state === 'ready') return;
+
+  /* 等级 */
+  ctx.font = '800 15px -apple-system,system-ui,sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#8fd0ff';
+  ctx.fillText('Lv.' + G.level, 16, 28);
+
+  /* 能量条 */
+  var barX = 78, barW = W - 78 - 96, barY = 21, barH = 13;
+  rr(barX, barY, barW, barH, 6.5);
+  ctx.fillStyle = 'rgba(120,160,220,0.16)';
+  ctx.fill();
+
+  var ratio = clamp(G.energy / G.energyNeed, 0, 1);
+  if (ratio > 0.005){
+    rr(barX, barY, Math.max(barH, barW * ratio), barH, 6.5);
+    var eg = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    eg.addColorStop(0, '#2fd9a0');
+    eg.addColorStop(1, '#6ff2ff');
+    ctx.fillStyle = eg;
+    ctx.fill();
+  }
+  rr(barX, barY, barW, barH, 6.5);
+  ctx.strokeStyle = 'rgba(140,200,255,0.28)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  /* 护盾 */
+  for (var i = 0; i < G.maxShield; i++){
+    var sx = W - 22 - i * 20;
+    var alive = i < G.shield;
+    ctx.beginPath();
+    ctx.arc(sx, 28, 6, 0, Math.PI * 2);
+    ctx.fillStyle = alive ? '#5ce1ff' : 'rgba(90,110,140,0.35)';
+    ctx.fill();
+    if (alive){
+      ctx.beginPath();
+      ctx.arc(sx - 1.6, 26, 2.2, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      ctx.fill();
+    }
+  }
+
+  /* 第二行信息 */
+  ctx.font = '600 12px -apple-system,system-ui,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(120,140,175,0.9)';
+  ctx.fillText(fmtTime(G.time) + '   ·   击碎 ' + G.kills, W / 2, 50);
+}
+
+function render(){
+  var sh = G.shake;
+  ctx.save();
+  if (sh > 0.2){
+    ctx.translate((Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh);
+  }
+
+  var bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#070b1c');
+  bg.addColorStop(0.45, '#0a1128');
+  bg.addColorStop(1, '#04060d');
+  ctx.fillStyle = bg;
+  ctx.fillRect(-30, -30, W + 60, H + 60);
+
+  drawStars();
+  drawOrbs();
+  drawRocks();
+  drawBullets();
+  drawShip();
+  drawParts();
+
+  ctx.restore();
+
+  drawHUD();
+}
+
+/* ================= 主循环 ================= */
+var last = 0, acc = 0;
+var STEP = 1 / 60;
+
+function loop(now){
+  requestAnimationFrame(loop);
+  if (!last) last = now;
+  var dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;
+
+  acc += dt;
+  var guard = 0;
+  while (acc >= STEP && guard < 5){
+    update(STEP);
+    acc -= STEP;
+    guard++;
+  }
+  if (guard >= 5) acc = 0;
+
+  render();
+}
+
+/* ================= 启动 ================= */
+resize();
+showPanel(
+  '<h1>巨石飞船</h1>' +
+  '<p>拖拽屏幕操控飞船 · 自动开火</p>' +
+  '<p>击碎巨石吸取能量升级</p>' +
+  '<p>巨石会不断变大，别停下</p>' +
+  '<div class="btn" id="startBtn">开始游戏</div>'
+);
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
